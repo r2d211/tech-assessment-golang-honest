@@ -10,9 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/honestbank/tech-assignment-backend-engineer/controllers"
 	env "github.com/joho/godotenv"
-
-	"github.com/honestbank/tech_assignment_fullstack_engineer/controllers"
 )
 
 const envFile = ".env"
@@ -31,7 +30,8 @@ func run() (s *http.Server) {
 	port = fmt.Sprintf(":%s", port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/process", controllers.ProcessData)
+	mux.HandleFunc("/process", controllers.ProcessRecord)
+	mux.HandleFunc("/phoneNumber", controllers.AddApprovedPhoneNumber)
 
 	s = &http.Server{
 		Addr:           port,

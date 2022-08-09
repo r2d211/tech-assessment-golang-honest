@@ -1,0 +1,432 @@
+From e72f6a790d0dfe0f595ebfb2eb9a672c705bd821 Mon Sep 17 00:00:00 2001
+From: mbajaj11 <mohit@zipmex.com>
+Date: Tue, 17 May 2022 22:04:00 +0700
+Subject: [PATCH] Add Approval Flow
+
+---
+ controllers/controller.go      |  72 ++++++++++++++---
+ engine/rules.go                |  94 ++++++++++++++++++++++
+ engine/rules_test.go           | 142 +++++++++++++++++++++++++++++++++
+ go.mod                         |   2 +-
+ main.go                        |   6 +-
+ risk/given_credit_risk_test.go |  31 +++++++
+ 6 files changed, 332 insertions(+), 15 deletions(-)
+ create mode 100644 engine/rules.go
+ create mode 100644 engine/rules_test.go
+ create mode 100644 risk/given_credit_risk_test.go
+
+diff --git a/controllers/controller.go b/controllers/controller.go
+index 031ef41..deaa740 100644
+--- a/controllers/controller.go
++++ b/controllers/controller.go
+@@ -5,25 +5,75 @@ import (
+ 	"fmt"
+ 	"log"
+ 	"net/http"
+-)
+ 
+-type RecordData struct {
+-	Income              int    `json:"income"`
+-	NumberOfCreditCards int    `json:"number_of_credit_cards"`
+-	Age                 int    `json:"age"`
+-	PoliticallyExposed  bool   `json:"politically_exposed"`
+-	JobIndustryCode     string `json:"job_industry_code"`
+-	PhoneNumber         string `json:"phone_number"`
+-}
++	"github.com/honestbank/tech-assignment-backend-engineer/engine"
++)
+ 
+ type JSONResponse struct {
+ 	Status string `json:"status"`
+ }
+ 
+-func ProcessData(resp http.ResponseWriter, req *http.Request) {
++type PhoneNumbers struct {
++	PhoneNumbers []string `json:"phone_numbers"`
++}
++
++func ProcessRecord(resp http.ResponseWriter, req *http.Request) {
+ 	switch req.Method {
+ 	case http.MethodPost:
+-		panic("not implemented")
++		var p engine.RecordData
++		var r JSONResponse
++		r = JSONResponse{
++			Status: "declined",
++		}
++		err := json.NewDecoder(req.Body).Decode(&p)
++		if err != nil {
++			http.Error(resp, err.Error(), http.StatusBadRequest)
++		}
++
++		if engine.CheckApproved(p) {
++			r = JSONResponse{
++				Status: "approved",
++			}
++		}
++		json.NewEncoder(resp).Encode(r)
++
++	default:
++		log.Println("error no 404")
++		resp.WriteHeader(http.StatusNotFound)
++		fmt.Fprint(resp, "not found")
++	}
++
++}
++
++func AddApprovedPhoneNumber(resp http.ResponseWriter, req *http.Request) {
++	switch req.Method {
++	case http.MethodPost:
++		var p PhoneNumbers
++		err := json.NewDecoder(req.Body).Decode(&p)
++
++		if err != nil {
++			http.Error(resp, err.Error(), http.StatusBadRequest)
++		}
++
++		for _, v := range p.PhoneNumbers {
++			engine.AddApprovedPhoneNumber(v)
++		}
++
++		json.NewEncoder(resp).Encode(JSONResponse{
++			Status: "approved",
++		})
++
++	case http.MethodDelete:
++		var p PhoneNumbers
++		err := json.NewDecoder(req.Body).Decode(&p)
++
++		if err != nil {
++			http.Error(resp, err.Error(), http.StatusBadRequest)
++		}
++		for _, v := range p.PhoneNumbers {
++			engine.RemovePreapprovedPhoneNumber(v)
++		}
++
+ 	default:
+ 		log.Println("error no 404")
+ 		resp.WriteHeader(http.StatusNotFound)
+diff --git a/engine/rules.go b/engine/rules.go
+new file mode 100644
+index 0000000..94b14e4
+--- /dev/null
++++ b/engine/rules.go
+@@ -0,0 +1,94 @@
++package engine
++
++import (
++	"github.com/honestbank/tech-assignment-backend-engineer/risk"
++)
++
++type RecordData struct {
++	Income              int    `json:"income"`
++	NumberOfCreditCards int    `json:"number_of_credit_cards"`
++	Age                 int    `json:"age"`
++	PoliticallyExposed  bool   `json:"politically_exposed"`
++	JobIndustryCode     string `json:"job_industry_code"`
++	PhoneNumber         string `json:"phone_number"`
++}
++
++var preApprovedPhoneNumbers = make(map[string]struct{})
++
++var allowedAreaCode = make(map[rune]struct{})
++
++var exists = struct{}{}
++
++var checks []func(RecordData) bool
++
++func init() {
++	allowedAreaCode['0'] = exists
++	allowedAreaCode['2'] = exists
++	allowedAreaCode['5'] = exists
++	allowedAreaCode['8'] = exists
++	checks = append(checks, IncomeCheck, AgeCheck,
++		CreditCardNumCheck, PoliticallyExposedCheck, AreaCodeCheck)
++
++}
++
++func AddApprovedPhoneNumber(number string) {
++
++	preApprovedPhoneNumbers[number] = exists
++}
++
++func RemovePreapprovedPhoneNumber(number string) {
++	delete(preApprovedPhoneNumbers, number)
++}
++
++func CheckApproved(applicationRecord RecordData) bool {
++	if PreApprovedCheck(applicationRecord) {
++		return true
++	} else {
++		result := true
++		for _, check := range checks {
++			result = result && check(applicationRecord)
++		}
++		return result
++	}
++}
++
++func IncomeCheck(applicationRecord RecordData) bool {
++	if applicationRecord.Income > 100000 {
++		return true
++	} else {
++		return false
++	}
++}
++
++func AgeCheck(applicationRecord RecordData) bool {
++	if applicationRecord.Age >= 18 {
++		return true
++	} else {
++		return false
++	}
++}
++
++func CreditCardNumCheck(applicationRecord RecordData) bool {
++	if applicationRecord.NumberOfCreditCards <= 3 &&
++		risk.CalculateCreditRisk(applicationRecord.Age, applicationRecord.NumberOfCreditCards) == "LOW" {
++		return true
++	} else {
++		return false
++	}
++}
++
++func PoliticallyExposedCheck(applicationRecord RecordData) bool {
++	return !applicationRecord.PoliticallyExposed
++}
++
++func AreaCodeCheck(applicationRecord RecordData) bool {
++	first := rune(applicationRecord.PhoneNumber[0])
++	_, check := allowedAreaCode[first]
++	return check
++
++}
++
++func PreApprovedCheck(applicationRecord RecordData) bool {
++	_, check := preApprovedPhoneNumbers[applicationRecord.PhoneNumber]
++	return check
++}
+diff --git a/engine/rules_test.go b/engine/rules_test.go
+new file mode 100644
+index 0000000..0cbdaa3
+--- /dev/null
++++ b/engine/rules_test.go
+@@ -0,0 +1,142 @@
++package engine
++
++import (
++	"strconv"
++	"testing"
++)
++
++func TestPoliticallyExposed(t *testing.T) {
++
++	exposedRecord := RecordData{
++		PoliticallyExposed: true,
++	}
++	got := PoliticallyExposedCheck(exposedRecord)
++	want := true
++	if got != want {
++		t.Errorf("got %t, wanted %t", got, want)
++	}
++
++}
++
++func TestAreaCodeCheck(t *testing.T) {
++
++	allowed := [4]int{0, 2, 5, 8}
++	disallowed := [6]int{1, 3, 4, 6, 7, 9}
++	for _, v := range allowed {
++		num := strconv.Itoa(v) + "12345678"
++		record := RecordData{
++			PhoneNumber: num,
++		}
++		got := AreaCodeCheck(record)
++		want := true
++
++		if got != want {
++			t.Errorf(" for num %s got %t, wanted %t", num, got, want)
++		}
++
++	}
++	for _, v := range disallowed {
++		num := strconv.Itoa(v) + "12345678"
++		record := RecordData{
++			PhoneNumber: num,
++		}
++		got := AreaCodeCheck(record)
++		want := false
++
++		if got != want {
++			t.Errorf(" for num %s got %t, wanted %t", num, got, want)
++		}
++
++	}
++}
++
++func TestIncomeCheck(t *testing.T) {
++
++	underIncomeRecord := RecordData{
++		Income: 10000,
++	}
++	got := IncomeCheck(underIncomeRecord)
++	want := false
++	if got != want {
++		t.Errorf("for income %d got %t, wanted %t", underIncomeRecord.Income, got, want)
++	}
++
++	healthyIncomeRecord := RecordData{
++		Income: 100001,
++	}
++
++	got = IncomeCheck(healthyIncomeRecord)
++	want = true
++	if got != want {
++		t.Errorf("for income %d got %t, wanted %t", healthyIncomeRecord.Income, got, want)
++	}
++}
++
++func TestCreditCardNumCheck(t *testing.T) {
++
++	LowCreditCardRiskRecords := []RecordData{
++		{
++			NumberOfCreditCards: 1,
++			Age:                 23,
++		},
++		{
++			NumberOfCreditCards: 2,
++			Age:                 52,
++		},
++		{
++			NumberOfCreditCards: 3,
++			Age:                 48,
++		},
++	}
++	for _, record := range LowCreditCardRiskRecords {
++		got := CreditCardNumCheck(record)
++		want := true
++		if got != want {
++			t.Errorf("for age %v got %t, wanted %t", record, got, want)
++		}
++	}
++
++	HighCreditCardRiskRecords := []RecordData{
++		{
++			NumberOfCreditCards: 1,
++			Age:                 22,
++		},
++		{
++			NumberOfCreditCards: 4,
++			Age:                 50,
++		},
++		{
++			NumberOfCreditCards: 3,
++			Age:                 47,
++		},
++	}
++	for _, record := range HighCreditCardRiskRecords {
++		got := CreditCardNumCheck(record)
++		want := false
++		if got != want {
++			t.Errorf("for age %v got %t, wanted %t", record, got, want)
++		}
++	}
++}
++
++func TestAgeCheck(t *testing.T) {
++
++	underAgeRecord := RecordData{
++		Age: 10,
++	}
++	got := AgeCheck(underAgeRecord)
++	want := false
++	if got != want {
++		t.Errorf("for age %d got %t, wanted %t", underAgeRecord.Age, got, want)
++	}
++
++	healthyAgeRecord := RecordData{
++		Age: 18,
++	}
++
++	got = AgeCheck(healthyAgeRecord)
++	want = true
++	if got != want {
++		t.Errorf("for age %d got %t, wanted %t", healthyAgeRecord.Age, got, want)
++	}
++}
+diff --git a/go.mod b/go.mod
+index 61eedab..7d4ebd9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,5 +1,5 @@
+ module github.com/honestbank/tech-assignment-backend-engineer
+ 
+-go 1.18
++go 1.18 
+ 
+ require github.com/joho/godotenv v1.4.0
+diff --git a/main.go b/main.go
+index 8818c8d..45464c4 100644
+--- a/main.go
++++ b/main.go
+@@ -10,9 +10,8 @@ import (
+ 	"syscall"
+ 	"time"
+ 
++	"github.com/honestbank/tech-assignment-backend-engineer/controllers"
+ 	env "github.com/joho/godotenv"
+-
+-	"github.com/honestbank/tech_assignment_fullstack_engineer/controllers"
+ )
+ 
+ const envFile = ".env"
+@@ -31,7 +30,8 @@ func run() (s *http.Server) {
+ 	port = fmt.Sprintf(":%s", port)
+ 
+ 	mux := http.NewServeMux()
+-	mux.HandleFunc("/process", controllers.ProcessData)
++	mux.HandleFunc("/process", controllers.ProcessRecord)
++	mux.HandleFunc("/phoneNumber", controllers.AddApprovedPhoneNumber)
+ 
+ 	s = &http.Server{
+ 		Addr:           port,
+diff --git a/risk/given_credit_risk_test.go b/risk/given_credit_risk_test.go
+new file mode 100644
+index 0000000..ccd577f
+--- /dev/null
++++ b/risk/given_credit_risk_test.go
+@@ -0,0 +1,31 @@
++package risk
++
++import (
++	"testing"
++)
++
++func TestCalculateCreditRisk(t *testing.T) {
++	age := 18
++	numberOfCC := 0
++	got := CalculateCreditRisk(age, numberOfCC)
++	want := "LOW"
++	if got != want {
++		t.Errorf("for age %d numberOfCC %d got %s, wanted %s", age, numberOfCC, got, want)
++	}
++
++	age = 19
++	numberOfCC = 1
++	got = CalculateCreditRisk(age, numberOfCC)
++	want = "HIGH"
++	if got != want {
++		t.Errorf("for age %d numberOfCC %d got %s, wanted %s", age, numberOfCC, got, want)
++	}
++
++	age = 20
++	numberOfCC = 2
++	got = CalculateCreditRisk(age, numberOfCC)
++	want = "MEDIUM"
++	if got != want {
++		t.Errorf("for age %d numberOfCC %d got %s, wanted %s", age, numberOfCC, got, want)
++	}
++}
+-- 
+2.30.1 (Apple Git-130)
+
